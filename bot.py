@@ -1,11 +1,14 @@
 import os
 import json
 import time
+import threading
 from dotenv import load_dotenv
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from urllib3.exceptions import ProtocolError
 from requests.exceptions import ConnectionError
+import fcm_receiver
+import re
 
 load_dotenv()
 
@@ -15,6 +18,7 @@ ALLOWED_USERS = [int(u.strip()) for u in ALLOWED_USERS_RAW.split(",") if u.strip
 
 bot = telebot.TeleBot(BOT_TOKEN)
 DATA_FILE = "trackers.json"
+FCM_KEYS_FILE = "fcm_keys.json"
 
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -57,7 +61,7 @@ def send_welcome(message):
     user_id = message.from_user.id
     bot.send_message(
         message.chat.id,
-        "Привет! Я бот для отслеживания тайтлов.\nВот ваши текущие отслеживаемые ID:",
+        "Привет! Я бот для отслеживания тайтлов Anilibria через пуш-уведомления Firebase (FCM).\nВот ваши текущие отслеживаемые ID:",
         reply_markup=get_main_keyboard(user_id)
     )
 
@@ -119,11 +123,121 @@ def process_add_id(message):
             reply_markup=get_main_keyboard(user_id)
         )
 
-if __name__ == "__main__":
-    print("Бот запущен...")
+def run_fcm_listener():
+    client = fcm_receiver.FCMClient()
+    client.app_id = "1:500586946614:android:7d9606acda0283a1"
+    client.project_id = "anilibria-app"
+    client.api_key = "AIzaSyC0hPAsvfeyVEUq9HlXPtKOghw2mVxc798"
+
+    # Загружаем ключи из файла или регистрируем новые, чтобы не делать checkin каждый раз
+    if os.path.exists(FCM_KEYS_FILE):
+        try:
+            with open(FCM_KEYS_FILE, "r") as f:
+                keys = json.load(f)
+                client.android_id = keys["android_id"]
+                client.security_token = keys["security_token"]
+                client.gcm_token = keys["gcm_token"]
+                client.fcm_token = keys["fcm_token"]
+                client.private_key = keys["private_key"]
+                client.public_key = keys["public_key"]
+                client.auth_secret = bytes.fromhex(keys["auth_secret_hex"])
+                client.require_gcm_token = False
+                print("[FCM] Loaded persisted credentials")
+        except Exception as e:
+            print("[FCM] Failed to load keys, registering new device:", e)
+            client.create_new_keys()
+            client.register()
+            save_fcm_keys(client)
+    else:
+        client.create_new_keys()
+        client.register()
+        save_fcm_keys(client)
+
+    # Подписываемся на топики уведомлений аниме
+    try:
+        client.subscribe_to_topic("all")
+        client.subscribe_to_topic("android_all")
+        print("[FCM] Subscribed to 'all' & 'android_all' topics")
+    except Exception as e:
+        print("[FCM] Error subscribing to topics:", e)
+
+    def on_notification(payload, persistent_id):
+        # Структура payload приходит в виде dict
+        # Пример: {"title": "Новая серия!", "body": "Вышла 5 серия...", "link": "https://anilibria.tv/anime/releases/release/id_or_code"}
+        print(f"[FCM] Received notification: {payload}")
+        title = payload.get("title", "")
+        body = payload.get("body", "")
+        link = payload.get("link", "") or payload.get("url", "")
+        
+        if not link:
+            return
+
+        # Ищем ID тайтла или код из ссылки
+        # Ссылки могут быть: .../release/123.html или .../release/title_code
+        match = re.search(r"release/([^/.]+)", link)
+        if not match:
+            return
+            
+        detected_id = match.group(1) # Например '9243' или 'horimiya'
+        
+        # Получаем всех пользователей и проверяем их подписки
+        users_data = load_data()
+        for user_id, tracked_ids in users_data.items():
+            # Если пользователь отслеживает этот ID
+            if detected_id in tracked_ids:
+                try:
+                    msg_text = f"🔔 *Новая серия!*\n\n*Тайтл:* {title}\n*Описание:* {body}\n\n[Открыть тайтл]({link})"
+                    bot.send_message(int(user_id), msg_text, parse_mode="Markdown")
+                    print(f"[FCM] Notification sent to user {user_id}")
+                except Exception as ex:
+                    print(f"[FCM] Failed to send message to user {user_id}: {ex}")
+
+    client.on_notification_message = on_notification
+    
+    while True:
+        try:
+            print("[FCM] Starting listener...")
+            client.start_listening()
+            while True:
+                time.sleep(1)
+        except Exception as e:
+            print(f"[FCM] Error in listener loop: {e}. Reconnecting in 10 seconds...")
+            try:
+                client.close()
+            except Exception:
+                pass
+            time.sleep(10)
+
+def save_fcm_keys(client):
+    try:
+        keys = {
+            "android_id": client.android_id,
+            "security_token": client.security_token,
+            "gcm_token": client.gcm_token,
+            "fcm_token": client.fcm_token,
+            "private_key": client.private_key,
+            "public_key": client.public_key,
+            "auth_secret_hex": client.auth_secret.hex()
+        }
+        with open(FCM_KEYS_FILE, "w") as f:
+            json.dump(keys, f)
+        print("[FCM] Credentials saved successfully")
+    except Exception as e:
+        print("[FCM] Failed to save keys:", e)
+
+def start_telegram_polling():
+    print("Telegram бот запущен...")
     while True:
         try:
             bot.infinity_polling(timeout=10, long_polling_timeout=5)
         except (ConnectionError, ProtocolError, Exception) as e:
-            print(f"Ошибка соединения: {e}. Переподключение через 5 секунд...")
+            print(f"Ошибка соединения Telegram: {e}. Переподключение через 5 секунд...")
             time.sleep(5)
+
+if __name__ == "__main__":
+    # Запускаем FCM в фоновом потоке
+    fcm_thread = threading.Thread(target=run_fcm_listener, daemon=True)
+    fcm_thread.start()
+
+    # Запускаем Telegram Bot Polling в основном потоке
+    start_telegram_polling()

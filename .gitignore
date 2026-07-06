@@ -1,5 +1,7 @@
 .env
 trackers.json
+fcm_keys.json
 venv/
 __pycache__/
 *.pyc
+
