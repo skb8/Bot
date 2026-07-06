@@ -1,8 +1,11 @@
 import os
 import json
+import time
 from dotenv import load_dotenv
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from urllib3.exceptions import ProtocolError
+from requests.exceptions import ConnectionError
 
 load_dotenv()
 
@@ -118,4 +121,9 @@ def process_add_id(message):
 
 if __name__ == "__main__":
     print("Бот запущен...")
-    bot.infinity_polling()
+    while True:
+        try:
+            bot.infinity_polling(timeout=10, long_polling_timeout=5)
+        except (ConnectionError, ProtocolError, Exception) as e:
+            print(f"Ошибка соединения: {e}. Переподключение через 5 секунд...")
+            time.sleep(5)
