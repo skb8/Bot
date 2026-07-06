@@ -138,8 +138,12 @@ def run_fcm_listener():
                 client.security_token = keys["security_token"]
                 client.gcm_token = keys["gcm_token"]
                 client.fcm_token = keys["fcm_token"]
-                client.private_key = keys["private_key"]
-                client.public_key = keys["public_key"]
+                
+                # Загружаем PEM ключи обратно в объекты
+                from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
+                client.private_key = load_pem_private_key(keys["private_key"].encode("utf-8"), password=None)
+                client.public_key = load_pem_public_key(keys["public_key"].encode("utf-8"))
+                
                 client.auth_secret = bytes.fromhex(keys["auth_secret_hex"])
                 client.require_gcm_token = False
                 print("[FCM] Loaded persisted credentials")
@@ -210,15 +214,34 @@ def run_fcm_listener():
 
 def save_fcm_keys(client):
     try:
+        # Сериализуем ECPrivateKey и ECPublicKey, если они являются объектами, а не строками
+        from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption, PublicFormat
+        
+        priv_key_str = client.private_key
+        if not isinstance(priv_key_str, str):
+            priv_key_str = client.private_key.private_bytes(
+                encoding=Encoding.PEM,
+                format=PrivateFormat.PKCS8,
+                encryption_algorithm=NoEncryption()
+            ).decode("utf-8")
+            
+        pub_key_str = client.public_key
+        if not isinstance(pub_key_str, str):
+            pub_key_str = client.public_key.public_bytes(
+                encoding=Encoding.PEM,
+                format=PublicFormat.SubjectPublicKeyInfo
+            ).decode("utf-8")
+
         keys = {
             "android_id": client.android_id,
             "security_token": client.security_token,
             "gcm_token": client.gcm_token,
             "fcm_token": client.fcm_token,
-            "private_key": client.private_key,
-            "public_key": client.public_key,
+            "private_key": priv_key_str,
+            "public_key": pub_key_str,
             "auth_secret_hex": client.auth_secret.hex()
         }
+            
         with open(FCM_KEYS_FILE, "w") as f:
             json.dump(keys, f)
         print("[FCM] Credentials saved successfully")
